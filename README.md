@@ -24,7 +24,7 @@ Le programme offre une interface graphique interactive permettant de :
 
 1. Cloner le dépôt :
    ```bash
-   git clone [URL_DU_DEPOT]
+   git clone [https://github.com/kBRAINX/DF-2D.git]
    cd DF-2D
    ```
 
