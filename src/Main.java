@@ -2,7 +2,7 @@
  * Point d'entrée principal du programme de résolution par différences finies 2D
  *
  * Ce programme résout l'équation -ΔU = f sur un domaine 2D carré [0,1]×[0,1]
- * avec conditions aux limites de Dirichlet homogènes (U = 0 sur le bord).
+ * avec conditions aux limites de Dirichlet générales U(0)=U₀, U(1)=U₁.
  *
  * Méthodes implémentées :
  * - Gauss-Seidel classique
@@ -10,11 +10,11 @@
  * - Gauss-Seidel parallélisé
  *
  * Fonctionnalités :
- * - Calcul de l'erreur en norme f² par intégration numérique
+ * - Calcul de l'erreur en norme L² par intégration numérique
  * - Calcul de l'ordre numérique de convergence
  * - Représentation graphique avec système de coloration
  * - Représentation graphique avec courbes de niveau (contours)
- *
+ * - Configuration flexible des conditions aux limites
  */
 public class Main {
 
@@ -45,7 +45,8 @@ public class Main {
                 System.out.println("Interface graphique lancée avec succès.");
                 System.out.println("Équation résolue : -ΔU = f");
                 System.out.println("Domaine : [0,1] × [0,1]");
-                System.out.println("Conditions aux limites : U = 0 sur le bord");
+                System.out.println("Conditions aux limites : U(bord) = valeurs spécifiées");
+                System.out.println("Discrétisation : Schéma 5 points");
                 System.out.println("=====================================");
 
             } catch (Exception e) {
@@ -73,6 +74,7 @@ public class Main {
         System.out.println();
         System.out.println("Fonctionnalités disponibles :");
         System.out.println("- Choix de différents cas de test");
+        System.out.println("- Configuration des conditions aux limites");
         System.out.println("- Sélection de la méthode de résolution");
         System.out.println("- Visualisation avec coloration");
         System.out.println("- Visualisation avec courbes de niveau");

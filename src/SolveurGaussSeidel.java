@@ -4,18 +4,19 @@ import java.util.function.Consumer;
 /**
  * Classe implémentant les différentes variantes de la méthode de Gauss-Seidel
  * pour résoudre le système linéaire issu de la discrétisation par différences finies
+ * avec conditions aux limites de Dirichlet générales
  *
  * L'équation -ΔU = f est discrétisée par le schéma 5 points :
  * (U[i-1,j] + U[i+1,j] + U[i,j-1] + U[i,j+1] - 4*U[i,j])/h² = -f[i,j]
  *
- * Réarrangé en forme itérative :
- * U[i,j] = (U[i-1,j] + U[i+1,j] + U[i,j-1] + U[i,j+1] + h²*f[i,j]) / 4
+ * Avec conditions aux limites générales, le terme source effectif devient :
+ * f_eff[i,j] = f[i,j] + (CL_voisines)/h² pour les points près du bord
  */
 public class SolveurGaussSeidel {
 
     // Paramètres de convergence
     private static final double TOLERANCE_DEFAULT = 1e-6;
-    private static final int MAX_ITERATIONS_DEFAULT = 1000;
+    private static final int MAX_ITERATIONS_DEFAULT = 10000;
 
     // Pool de threads pour la parallélisation
     private static final int NB_THREADS = Runtime.getRuntime().availableProcessors();
@@ -47,14 +48,16 @@ public class SolveurGaussSeidel {
         public final long tempsCalcul;
         public final boolean converge;
         public final double[] historiqueErreurs;
+        public final String methodeUtilisee;
 
         public ResultatConvergence(int iterations, double erreurFinale, long tempsCalcul,
-                                   boolean converge, double[] historiqueErreurs) {
+                                   boolean converge, double[] historiqueErreurs, String methode) {
             this.iterations = iterations;
             this.erreurFinale = erreurFinale;
             this.tempsCalcul = tempsCalcul;
             this.converge = converge;
             this.historiqueErreurs = historiqueErreurs;
+            this.methodeUtilisee = methode;
         }
     }
 
@@ -82,7 +85,13 @@ public class SolveurGaussSeidel {
                                         Consumer<Integer> callbackProgres) {
 
         System.out.println("Début résolution avec " + methode.getNom());
+        System.out.println("Conditions aux limites: " + maillage.getConditionsLimites().getDescription());
         System.out.println("Tolérance: " + tolerance + ", Max itérations: " + maxIterations);
+
+        // Vérification de la cohérence du maillage
+        if (!maillage.verifierCoherence()) {
+            System.err.println("Attention: Maillage incohérent détecté!");
+        }
 
         switch (methode) {
             case GAUSS_SEIDEL_CLASSIQUE:
@@ -101,17 +110,13 @@ public class SolveurGaussSeidel {
 
     /**
      * Méthode de Gauss-Seidel classique (séquentielle)
+     * Adaptée aux conditions aux limites générales
      *
-     * Principe: Pour chaque point (i,j), on met à jour U[i,j] en utilisant
-     * les valeurs les plus récentes des points voisins.
+     * Pour un point intérieur (i,j), la mise à jour devient :
+     * U[i,j] = (U[i-1,j] + U[i+1,j] + U[i,j-1] + U[i,j+1] + h²*f[i,j]) / 4
      *
-     * Formule: U[i,j] = (U[i-1,j] + U[i+1,j] + U[i,j-1] + U[i,j+1] + h²*f[i,j]) / 4
-     *
-     * @param maillage Le maillage à résoudre
-     * @param tolerance Tolérance pour l'arrêt
-     * @param maxIterations Nombre maximum d'itérations
-     * @param callbackProgres Callback de progression
-     * @return Résultat de la convergence
+     * Les termes U[voisin] incluent les valeurs des conditions aux limites
+     * lorsque le voisin est sur le bord.
      */
     private ResultatConvergence gaussSeidelClassique(Maillage maillage, double tolerance,
                                                      int maxIterations, Consumer<Integer> callbackProgres) {
@@ -127,6 +132,8 @@ public class SolveurGaussSeidel {
         int iteration = 0;
         double erreurMax;
 
+        System.out.println("Gauss-Seidel classique avec conditions aux limites générales");
+
         do {
             erreurMax = 0.0;
 
@@ -136,8 +143,15 @@ public class SolveurGaussSeidel {
                     if (!maillage.isBoundary(i, j)) {
                         double ancienneValeur = U[i][j];
 
+                        // Calcul du terme source effectif incluant les CL
+                        double termeSource = h2 * F[i][j];
+
+                        // Les valeurs voisines incluent automatiquement les CL
+                        // car elles sont maintenues dans la matrice U
+                        double sommeVoisins = U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1];
+
                         // Mise à jour selon le schéma 5 points
-                        U[i][j] = (U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1] + h2 * F[i][j]) / 4.0;
+                        U[i][j] = (sommeVoisins + termeSource) / 4.0;
 
                         // Calcul de l'erreur locale
                         double erreur = Math.abs(U[i][j] - ancienneValeur);
@@ -166,28 +180,13 @@ public class SolveurGaussSeidel {
         System.out.println("  Temps: " + (fin - debut) + " ms");
 
         return new ResultatConvergence(iteration, erreurMax, fin - debut, converge,
-            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1));
+            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1),
+            "Gauss-Seidel Classique");
     }
 
     /**
-     * Méthode de Gauss-Seidel avec relaxation (SOR - Successive Over-Relaxation)
-     *
-     * Principe: On applique un facteur de relaxation ω pour accélérer ou stabiliser
-     * la convergence.
-     *
-     * Formule: U_new[i,j] = (1-ω)*U_old[i,j] + ω*U_GS[i,j]
-     * où U_GS[i,j] est la valeur calculée par Gauss-Seidel standard
-     *
-     * - ω = 1: Gauss-Seidel classique
-     * - 1 < ω < 2: Sur-relaxation (accélération)
-     * - 0 < ω < 1: Sous-relaxation (stabilisation)
-     *
-     * @param maillage Le maillage à résoudre
-     * @param tolerance Tolérance pour l'arrêt
-     * @param maxIterations Nombre maximum d'itérations
-     * @param omega Paramètre de relaxation
-     * @param callbackProgres Callback de progression
-     * @return Résultat de la convergence
+     * Méthode de Gauss-Seidel avec relaxation (SOR)
+     * Adaptée aux conditions aux limites générales
      */
     private ResultatConvergence gaussSeidelAvecRelaxation(Maillage maillage, double tolerance,
                                                           int maxIterations, double omega,
@@ -200,7 +199,8 @@ public class SolveurGaussSeidel {
         double h = maillage.getH();
         double h2 = h * h;
 
-        System.out.println("Paramètre de relaxation ω = " + omega);
+        System.out.println("Gauss-Seidel avec relaxation ω = " + omega);
+        System.out.println("Conditions aux limites prises en compte automatiquement");
 
         double[] historiqueErreurs = new double[maxIterations + 1];
         int iteration = 0;
@@ -215,7 +215,9 @@ public class SolveurGaussSeidel {
                         double ancienneValeur = U[i][j];
 
                         // Calcul de la valeur Gauss-Seidel standard
-                        double valeurGS = (U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1] + h2 * F[i][j]) / 4.0;
+                        double termeSource = h2 * F[i][j];
+                        double sommeVoisins = U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1];
+                        double valeurGS = (sommeVoisins + termeSource) / 4.0;
 
                         // Application de la relaxation
                         U[i][j] = (1.0 - omega) * ancienneValeur + omega * valeurGS;
@@ -246,29 +248,13 @@ public class SolveurGaussSeidel {
         System.out.println("  Temps: " + (fin - debut) + " ms");
 
         return new ResultatConvergence(iteration, erreurMax, fin - debut, converge,
-            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1));
+            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1),
+            "Gauss-Seidel avec Relaxation (ω=" + omega + ")");
     }
 
     /**
-     * Méthode de Gauss-Seidel parallélisée
-     *
-     * Principe: On utilise un schéma de coloration rouge-noir (damier) pour permettre
-     * la parallélisation. Les points "rouges" et "noirs" peuvent être mis à jour
-     * en parallèle car ils ne dépendent pas les uns des autres dans le schéma 5 points.
-     *
-     * Coloration: (i+j) % 2 == 0 → Rouge, (i+j) % 2 == 1 → Noir
-     *
-     * Algorithme:
-     * 1. Mettre à jour tous les points rouges en parallèle
-     * 2. Synchronisation
-     * 3. Mettre à jour tous les points noirs en parallèle
-     * 4. Répéter jusqu'à convergence
-     *
-     * @param maillage Le maillage à résoudre
-     * @param tolerance Tolérance pour l'arrêt
-     * @param maxIterations Nombre maximum d'itérations
-     * @param callbackProgres Callback de progression
-     * @return Résultat de la convergence
+     * Méthode de Gauss-Seidel parallélisée avec coloration rouge-noir
+     * Adaptée aux conditions aux limites générales
      */
     private ResultatConvergence gaussSeidelParallele(Maillage maillage, double tolerance,
                                                      int maxIterations, Consumer<Integer> callbackProgres) {
@@ -280,7 +266,8 @@ public class SolveurGaussSeidel {
         double h = maillage.getH();
         double h2 = h * h;
 
-        System.out.println("Utilisation de " + NB_THREADS + " threads pour la parallélisation");
+        System.out.println("Gauss-Seidel parallélisé avec " + NB_THREADS + " threads");
+        System.out.println("Coloration rouge-noir pour la parallélisation");
 
         double[] historiqueErreurs = new double[maxIterations + 1];
         int iteration = 0;
@@ -314,16 +301,13 @@ public class SolveurGaussSeidel {
         System.out.println("  Temps: " + (fin - debut) + " ms");
 
         return new ResultatConvergence(iteration, erreurMax, fin - debut, converge,
-            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1));
+            java.util.Arrays.copyOf(historiqueErreurs, iteration + 1),
+            "Gauss-Seidel Parallélisé (" + NB_THREADS + " threads)");
     }
 
     /**
      * Met à jour un ensemble de points (rouge ou noir) en parallèle
-     *
-     * @param maillage Le maillage
-     * @param couleur 0 pour rouge (i+j pair), 1 pour noir (i+j impair)
-     * @param calculerErreur Si true, calcule l'erreur maximale
-     * @return L'erreur maximale observée
+     * Prend en compte automatiquement les conditions aux limites
      */
     private double mettreAJourPointsParallele(Maillage maillage, int couleur, boolean calculerErreur) {
         double[][] U = maillage.getU();
@@ -347,12 +331,18 @@ public class SolveurGaussSeidel {
 
                 for (int i = debutLigne; i <= finLigne; i++) {
                     for (int j = 1; j <= N; j++) {
-                        // Vérifier la couleur du point
+                        // Vérifier la couleur du point et qu'il n'est pas sur le bord
                         if ((i + j) % 2 == couleur && !maillage.isBoundary(i, j)) {
                             double ancienneValeur = U[i][j];
 
+                            // Calcul du terme source effectif
+                            double termeSource = h2 * F[i][j];
+
+                            // Somme des voisins (inclut automatiquement les CL)
+                            double sommeVoisins = U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1];
+
                             // Mise à jour selon le schéma 5 points
-                            U[i][j] = (U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1] + h2 * F[i][j]) / 4.0;
+                            U[i][j] = (sommeVoisins + termeSource) / 4.0;
 
                             if (calculerErreur) {
                                 double erreur = Math.abs(U[i][j] - ancienneValeur);
@@ -381,8 +371,123 @@ public class SolveurGaussSeidel {
     }
 
     /**
+     * Calcule le résidu du système Ax = b
+     * Utile pour vérifier la qualité de la solution
+     */
+    public double calculerResidu(Maillage maillage) {
+        double[][] U = maillage.getU();
+        double[][] F = maillage.getF();
+        int N = maillage.getN();
+        double h = maillage.getH();
+        double h2 = h * h;
+
+        double residuMax = 0.0;
+        double residuL2 = 0.0;
+        int compteur = 0;
+
+        for (int i = 1; i <= N; i++) {
+            for (int j = 1; j <= N; j++) {
+                if (!maillage.isBoundary(i, j)) {
+                    // Calcul du résidu local: r = f - L(U)
+                    // où L est l'opérateur de différences finies
+                    double laplacienDiscret = (U[i-1][j] + U[i+1][j] + U[i][j-1] + U[i][j+1] - 4*U[i][j]) / h2;
+                    double residu = Math.abs(F[i][j] - (-laplacienDiscret));
+
+                    residuMax = Math.max(residuMax, residu);
+                    residuL2 += residu * residu;
+                    compteur++;
+                }
+            }
+        }
+
+        residuL2 = Math.sqrt(residuL2 / compteur);
+
+        System.out.println("Résidu du système:");
+        System.out.println("  Résidu max: " + String.format("%.2e", residuMax));
+        System.out.println("  Résidu L2: " + String.format("%.2e", residuL2));
+
+        return residuMax;
+    }
+
+    /**
+     * Teste la convergence pour différentes valeurs de ω (SOR)
+     */
+    public void testerParametresRelaxation(Maillage maillage, double[] valeurs_omega) {
+        System.out.println("=== Test des paramètres de relaxation ===");
+
+        double[][] solutionInitiale = maillage.copierSolution();
+
+        for (double omega : valeurs_omega) {
+            System.out.println("\nTest avec ω = " + omega);
+
+            // Restaurer l'état initial
+            maillage.restaurerSolution(solutionInitiale);
+
+            // Test rapide avec peu d'itérations
+            ResultatConvergence resultat = resoudre(maillage, MethodeResolution.GAUSS_SEIDEL_RELAXATION,
+                1e-4, 1000, omega, null);
+
+            System.out.println("  Itérations: " + resultat.iterations);
+            System.out.println("  Erreur finale: " + String.format("%.2e", resultat.erreurFinale));
+            System.out.println("  Convergé: " + resultat.converge);
+
+            if (resultat.converge) {
+                double facteur = AnalyseurErreurs.analyserConvergenceIterative(resultat.historiqueErreurs);
+                System.out.println("  Facteur de convergence: " + String.format("%.4f", facteur));
+            }
+        }
+
+        // Restaurer l'état initial
+        maillage.restaurerSolution(solutionInitiale);
+    }
+
+    /**
+     * Effectue une analyse de performance comparative
+     */
+    public void analyserPerformances(Maillage maillage) {
+        System.out.println("=== Analyse de performances ===");
+
+        double[][] solutionInitiale = maillage.copierSolution();
+        double tolerance = 1e-6;
+        int maxIter = 5000;
+
+        MethodeResolution[] methodes = {
+            MethodeResolution.GAUSS_SEIDEL_CLASSIQUE,
+            MethodeResolution.GAUSS_SEIDEL_RELAXATION,
+            MethodeResolution.GAUSS_SEIDEL_PARALLELE
+        };
+
+        for (MethodeResolution methode : methodes) {
+            System.out.println("\n--- " + methode.getNom() + " ---");
+
+            // Restaurer l'état initial
+            maillage.restaurerSolution(solutionInitiale);
+
+            double omega = (methode == MethodeResolution.GAUSS_SEIDEL_RELAXATION) ?
+                calculerOmegaOptimal(maillage.getN()) : 1.0;
+
+            long debut = System.currentTimeMillis();
+            ResultatConvergence resultat = resoudre(maillage, methode, tolerance, maxIter, omega, null);
+            long fin = System.currentTimeMillis();
+
+            System.out.println("Temps total: " + (fin - debut) + " ms");
+            System.out.println("Itérations: " + resultat.iterations);
+            System.out.println("Convergé: " + resultat.converge);
+            System.out.println("Erreur finale: " + String.format("%.2e", resultat.erreurFinale));
+
+            // Calcul du résidu
+            double residu = calculerResidu(maillage);
+
+            // Efficacité (itérations par seconde)
+            double efficacite = resultat.iterations * 1000.0 / (fin - debut);
+            System.out.println("Efficacité: " + String.format("%.1f", efficacite) + " iter/s");
+        }
+
+        maillage.restaurerSolution(solutionInitiale);
+    }
+
+    /**
      * Ferme le pool de threads
-     * À appeler avant la fermeture de l'application
      */
     public void fermer() {
         if (executorService != null && !executorService.isShutdown()) {
@@ -399,31 +504,41 @@ public class SolveurGaussSeidel {
     }
 
     /**
-     * Méthode utilitaire pour résoudre avec paramètres par défaut
+     * Méthodes utilitaires pour résoudre avec paramètres par défaut
      */
     public ResultatConvergence resoudre(Maillage maillage, MethodeResolution methode) {
         return resoudre(maillage, methode, TOLERANCE_DEFAULT, MAX_ITERATIONS_DEFAULT, 1.0, null);
     }
 
-    /**
-     * Méthode utilitaire pour résoudre avec SOR et paramètre omega personnalisé
-     */
     public ResultatConvergence resoudreSOR(Maillage maillage, double omega) {
         return resoudre(maillage, MethodeResolution.GAUSS_SEIDEL_RELAXATION,
             TOLERANCE_DEFAULT, MAX_ITERATIONS_DEFAULT, omega, null);
     }
 
     /**
-     * Calcule le paramètre optimal de relaxation pour SOR (approximation)
-     * Basé sur la théorie pour les matrices de différences finies 2D
-     *
-     * @param N Taille du maillage
-     * @return Paramètre omega optimal approximatif
+     * Calcule le paramètre optimal de relaxation pour SOR
+     * Formule adaptée aux conditions aux limites générales
      */
     public static double calculerOmegaOptimal(int N) {
-        // Pour le problème de Poisson 2D avec conditions de Dirichlet sur les bords, ω_optimal ≈ 2 / (1 + sin(π/N))
-        double omega = 2.0 / (1.0 + Math.sin(Math.PI / N));
-        System.out.println("Paramètre ω optimal calculé: " + omega + " pour N=" + N);
+        // Pour le problème de Poisson 2D avec différences finies:
+        // ω_optimal ≈ 2 / (1 + sin(π/(N+1)))
+        // Cette formule reste valide pour les conditions de Dirichlet générales
+        double omega = 2.0 / (1.0 + Math.sin(Math.PI / (N + 1)));
+        System.out.println("Paramètre ω optimal calculé: " + String.format("%.4f", omega) + " pour N=" + N);
         return omega;
+    }
+
+    /**
+     * Estime le nombre de conditionnement de la matrice
+     * (approximation basée sur les valeurs propres théoriques)
+     */
+    public static double NombreConditionnement(int N) {
+        // Pour la matrice de différences finies 2D:
+        // cond(A) ≈ (2/h²) * (1/sin²(π*h/2)) ≈ 8/π² * (N+1)²
+        double h = 1.0 / (N + 1);
+        double cond = 8.0 / (Math.PI * Math.PI) * (N + 1) * (N + 1);
+
+        System.out.println("Nombre de conditionnement estimé: " + String.format("%.2e", cond));
+        return cond;
     }
 }
