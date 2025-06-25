@@ -1,5 +1,7 @@
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseMotionAdapter;
 import java.awt.geom.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +12,7 @@ import java.util.List;
  * Implémente plusieurs types de représentation :
  * 1. Système de coloration (heatmap) Représentation par couleurs
  * 2. Courbes de niveau (contours) Isolignes de la solution
- * 3. Surface 3D - Projection isométrique
+ * 3. Surface 3D - Projection isométrique (Non implémenté dans cette version, mais dessinerSurface3DAvecConditions est là)
  * 4. Carte des erreurs - Visualisation des erreurs locales
  *
  * Adaptations pour les conditions aux limites générales :
@@ -18,6 +20,7 @@ import java.util.List;
  * - Mise en évidence des variations aux bords
  * - Analyse de la continuité aux interfaces
  * - Visualisation de l'influence des conditions sur la solution
+ * - Affichage des coordonnées et valeur au survol
  */
 public class VisualiseurGraphique {
 
@@ -28,14 +31,10 @@ public class VisualiseurGraphique {
         COLORATION("Système de Coloration (Heatmap)"),
         COURBES_NIVEAU("Courbes de Niveau (Contours)"),
         ERREURS("Carte des Erreurs"),
-        CONDITIONS_LIMITES("Conditions aux Limites");
+        CONDITIONS_LIMITES("Visualisation des Conditions aux Limites");
 
         private final String nom;
-
-        TypeVisualisation(String nom) {
-            this.nom = nom;
-        }
-
+        TypeVisualisation(String nom) { this.nom = nom; }
         public String getNom() { return nom; }
     }
 
@@ -55,14 +54,56 @@ public class VisualiseurGraphique {
         private AnalyseurErreurs.ResultatAnalyse analyseErreurs;
         private boolean afficherGrille = true;
         private boolean afficherValeurs = false;
-        private boolean afficherConditionsLimites = true;
+        private boolean afficherConditionsLimitesTexte = true; // Renommé pour clarté
         private boolean mettreEnEvidenceBords = true;
         private double[] niveauxContours;
+
+        // Variables pour le tooltip et le dessin, mises à jour dans paintComponent
+        private int lastOffsetX, lastOffsetY, lastTailleCellule, lastNtotal;
+
 
         public PanelVisualisation(int largeur, int hauteur) {
             setPreferredSize(new Dimension(largeur, hauteur));
             setBackground(Color.WHITE);
             this.typeVisu = TypeVisualisation.COLORATION;
+
+            // Activer les tooltips
+            ToolTipManager.sharedInstance().registerComponent(this);
+
+            addMouseMotionListener(new MouseMotionAdapter() {
+                @Override
+                public void mouseMoved(MouseEvent e) {
+                    if (maillage == null || lastNtotal == 0 || lastTailleCellule == 0) {
+                        setToolTipText(null);
+                        return;
+                    }
+
+                    int mouseX = e.getX();
+                    int mouseY = e.getY();
+
+                    // Convertir les coordonnées de la souris en indices de cellule (i, j globaux)
+                    // Attention à l'inversion de l'axe Y pour l'affichage
+                    int j_grid = (mouseX - lastOffsetX) / lastTailleCellule;
+                    int i_grid_visu = (mouseY - lastOffsetY) / lastTailleCellule; // Indice i pour affichage (0 en haut)
+                    int i_grid = lastNtotal - 1 - i_grid_visu; // Indice i mathématique (0 en bas)
+
+
+                    if (j_grid >= 0 && j_grid < lastNtotal && i_grid >= 0 && i_grid < lastNtotal) {
+                        double valeur = maillage.getU(i_grid, j_grid);
+                        double[] coords = maillage.getCoordinates(i_grid, j_grid); // x, y physiques
+                        String tooltip = String.format("Cellule [%d,%d] Coords (%.3f, %.3f) Valeur: %.4e",
+                            i_grid, j_grid, coords[0], coords[1], valeur);
+                        if (maillage.isBoundary(i_grid,j_grid)) {
+                            tooltip += " (Bord)";
+                        } else {
+                            tooltip += " (Intérieur)";
+                        }
+                        setToolTipText(tooltip);
+                    } else {
+                        setToolTipText(null); // Souris en dehors de la grille
+                    }
+                }
+            });
         }
 
         /**
@@ -71,7 +112,9 @@ public class VisualiseurGraphique {
         public void mettreAJour(Maillage maillage, AnalyseurErreurs.ResultatAnalyse analyseErreurs) {
             this.maillage = maillage;
             this.analyseErreurs = analyseErreurs;
-            calculerNiveauxContours();
+            if (maillage != null) {
+                calculerNiveauxContours();
+            }
             repaint();
         }
 
@@ -87,10 +130,12 @@ public class VisualiseurGraphique {
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
 
-            if (maillage == null) {
+            if (maillage == null || maillage.getN_total() == 0) {
                 dessinerMessageAttente(g);
                 return;
             }
+
+            lastNtotal = maillage.getN_total(); // Pour le tooltip
 
             Graphics2D g2d = (Graphics2D) g;
             g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -110,8 +155,10 @@ public class VisualiseurGraphique {
                     break;
             }
 
-            dessinerLegende(g2d);
-            dessinerInformationsConditions(g2d);
+            dessinerLegende(g2d); // Peut-être redondant si barre de couleur déjà là
+            if (afficherConditionsLimitesTexte) { // Afficher le texte des conditions
+                dessinerInformationsConditions(g2d);
+            }
         }
 
         /**
@@ -119,31 +166,41 @@ public class VisualiseurGraphique {
          */
         private void dessinerColorationAvecConditions(Graphics2D g2d) {
             double[][] U = maillage.getU();
-            int N = maillage.getN();
+            int N_total = maillage.getN_total(); // Nombre total de points
 
             // Calcul des dimensions d'affichage
             int marge = 50;
-            int largeurDispo = getWidth() - 2 * marge - 150;
-            int hauteurDispo = getHeight() - 2 * marge - 80; // Plus d'espace pour les infos CL
+            int largeurDispo = getWidth() - 2 * marge - 150; // Espace pour barre de couleur
+            int hauteurDispo = getHeight() - 2 * marge - 80; // Espace pour infos
 
-            int tailleCellule = Math.min(largeurDispo / (N + 2), hauteurDispo / (N + 2));
+            // N_total cellules à afficher
+            int tailleCellule = (N_total > 0) ? Math.min(largeurDispo / N_total, hauteurDispo / N_total) : 10;
+            tailleCellule = Math.max(1, tailleCellule); // Assurer une taille minimale
+
             int offsetX = marge;
             int offsetY = marge;
 
-            // Détermination des valeurs min/max pour la normalisation
+            // Mettre à jour pour le tooltip
+            this.lastOffsetX = offsetX;
+            this.lastOffsetY = offsetY;
+            this.lastTailleCellule = tailleCellule;
+
+
             double[] minMax = calculerMinMax(U);
             double minVal = minMax[0];
             double maxVal = minMax[1];
 
-            // Dessin du maillage coloré avec distinction des bords
-            for (int i = 0; i <= N + 1; i++) {
-                for (int j = 0; j <= N + 1; j++) {
-                    int x = offsetX + j * tailleCellule;
-                    int y = offsetY + (N + 1 - i) * tailleCellule;
+            // Dessin du maillage coloré
+            // i, j sont les indices GLOBAUX du maillage (0 à N_total-1)
+            for (int i = 0; i < N_total; i++) {
+                for (int j = 0; j < N_total; j++) {
+                    // x, y sont les coins supérieurs gauches des cellules à dessiner
+                    // L'axe y de l'affichage est inversé par rapport à l'axe y mathématique
+                    int x_rect = offsetX + j * tailleCellule;
+                    int y_rect = offsetY + (N_total - 1 - i) * tailleCellule; // Inversion de l'axe i
 
                     Color couleurCellule;
                     if (maillage.isBoundary(i, j)) {
-                        // Conditions aux limites avec couleur spéciale
                         if (mettreEnEvidenceBords) {
                             couleurCellule = getCouleurConditionLimite(U[i][j], minVal, maxVal);
                         } else {
@@ -151,42 +208,35 @@ public class VisualiseurGraphique {
                             couleurCellule = getCouleurHeatmap(valeurNormalisee);
                         }
                     } else {
-                        // Points intérieurs
                         double valeurNormalisee = normaliser(U[i][j], minVal, maxVal);
                         couleurCellule = getCouleurHeatmap(valeurNormalisee);
                     }
 
-                    // Remplissage de la cellule
                     g2d.setColor(couleurCellule);
-                    g2d.fillRect(x, y, tailleCellule, tailleCellule);
+                    g2d.fillRect(x_rect, y_rect, tailleCellule, tailleCellule);
 
-                    // Contour spécial pour les conditions aux limites
                     if (maillage.isBoundary(i, j) && mettreEnEvidenceBords) {
                         g2d.setColor(Color.BLACK);
                         g2d.setStroke(new BasicStroke(2));
-                        g2d.drawRect(x, y, tailleCellule, tailleCellule);
+                        g2d.drawRect(x_rect, y_rect, tailleCellule, tailleCellule);
                         g2d.setStroke(new BasicStroke(1));
                     } else if (afficherGrille) {
                         g2d.setColor(Color.LIGHT_GRAY);
-                        g2d.drawRect(x, y, tailleCellule, tailleCellule);
+                        g2d.drawRect(x_rect, y_rect, tailleCellule, tailleCellule);
                     }
 
-                    // Affichage des valeurs
                     if (afficherValeurs && tailleCellule > 25) {
                         g2d.setColor(maillage.isBoundary(i, j) ? Color.WHITE : Color.BLACK);
-                        g2d.setFont(new Font("Arial", Font.PLAIN,
-                            maillage.isBoundary(i, j) ? 9 : 8));
+                        g2d.setFont(new Font("Arial", Font.PLAIN, maillage.isBoundary(i,j) ? 9 : 8));
                         String valeurStr = String.format("%.2f", U[i][j]);
                         FontMetrics fm = g2d.getFontMetrics();
-                        int textX = x + (tailleCellule - fm.stringWidth(valeurStr)) / 2;
-                        int textY = y + (tailleCellule + fm.getAscent()) / 2;
+                        int textX = x_rect + (tailleCellule - fm.stringWidth(valeurStr)) / 2;
+                        int textY = y_rect + (tailleCellule + fm.getAscent()) / 2;
                         g2d.drawString(valeurStr, textX, textY);
                     }
                 }
             }
-
-            // Dessin de la barre de couleur
-            dessinerBarreCouleurAvecConditions(g2d, offsetX + (N + 2) * tailleCellule + 20, offsetY, minVal, maxVal);
+            dessinerBarreCouleurAvecConditions(g2d, offsetX + N_total * tailleCellule + 20, offsetY, minVal, maxVal);
         }
 
         /**
@@ -194,366 +244,380 @@ public class VisualiseurGraphique {
          */
         private void dessinerCourbesNiveauAvecConditions(Graphics2D g2d) {
             double[][] U = maillage.getU();
-            int N = maillage.getN();
+            int N_total = maillage.getN_total();
+            if (N_total < 2) { // Pas assez de points pour des cellules
+                g2d.drawString("Maillage trop petit pour les courbes de niveau", 50,50);
+                return;
+            }
+
 
             int marge = 50;
-            int largeurDispo = getWidth() - 2 * marge;
+            int largeurDispo = getWidth() - 2 * marge - 150; // Espace pour légende potentielle
             int hauteurDispo = getHeight() - 2 * marge - 80;
 
-            double echelleX = (double) largeurDispo / (N + 1);
-            double echelleY = (double) hauteurDispo / (N + 1);
+            // N_total-1 intervalles dans chaque direction
+            double echelleX = (N_total > 1) ? (double) largeurDispo / (N_total - 1) : largeurDispo;
+            double echelleY = (N_total > 1) ? (double) hauteurDispo / (N_total - 1) : hauteurDispo;
 
-            // Fond blanc
+            // Mettre à jour pour le tooltip (approximatif pour courbes de niveau)
+            // On utilise N_total-1 car echelleX/Y est par intervalle
+            this.lastOffsetX = marge;
+            this.lastOffsetY = marge;
+            this.lastTailleCellule = (int)Math.min(echelleX, echelleY); // Approximation
+            // this.lastNtotal reste maillage.getN_total()
+
             g2d.setColor(Color.WHITE);
             g2d.fillRect(marge, marge, largeurDispo, hauteurDispo);
-
-            // Dessin du contour du domaine avec mise en évidence
             g2d.setColor(Color.BLACK);
             g2d.setStroke(new BasicStroke(3));
             g2d.drawRect(marge, marge, largeurDispo, hauteurDispo);
 
-            // Calcul et dessin des courbes de niveau
             if (niveauxContours != null) {
                 Color[] couleursContours = genererCouleursContours(niveauxContours.length);
-
                 for (int k = 0; k < niveauxContours.length; k++) {
                     double niveau = niveauxContours[k];
                     g2d.setColor(couleursContours[k]);
                     g2d.setStroke(new BasicStroke(1.5f));
-
-                    // Algorithme de contours
-                    for (int i = 1; i <= N; i++) {
-                        for (int j = 1; j <= N; j++) {
-                            dessinerContourCellule(g2d, U, i, j, niveau, marge, echelleX, echelleY, N);
+                    // Boucle sur les cellules (N_total-1 x N_total-1 cellules)
+                    // i, j sont les indices du coin inférieur gauche de la cellule
+                    for (int i_cell = 0; i_cell < N_total - 1; i_cell++) { // Indice global i du coin bas-gauche
+                        for (int j_cell = 0; j_cell < N_total - 1; j_cell++) { // Indice global j du coin bas-gauche
+                            dessinerContourCellule(g2d, U, i_cell, j_cell, niveau, marge, echelleX, echelleY, N_total);
                         }
                     }
                 }
             }
 
-            // Visualisation des conditions aux limites
-            if (afficherConditionsLimites) {
-                dessinerConditionsAuxLimitesSurContours(g2d, marge, echelleX, echelleY, N);
+            if (mettreEnEvidenceBords) { // Option pour visualiser les bords différemment
+                dessinerConditionsAuxLimitesSurContours(g2d, marge, echelleX, echelleY, N_total);
             }
 
-            // Grille optionnelle
-            if (afficherGrille) {
+            if (afficherGrille && N_total > 1) {
                 g2d.setColor(new Color(200, 200, 200, 100));
                 g2d.setStroke(new BasicStroke(0.5f));
-
-                for (int i = 0; i <= N + 1; i++) {
-                    int x = (int) (marge + i * echelleX);
-                    int y = (int) (marge + i * echelleY);
-                    g2d.drawLine(x, marge, x, marge + hauteurDispo);
-                    g2d.drawLine(marge, y, marge + largeurDispo, y);
+                for (int k = 0; k < N_total; k++) { // k itère sur les lignes de la grille
+                    int x_ligne = (int) (marge + k * echelleX);
+                    int y_ligne = (int) (marge + k * echelleY);
+                    g2d.drawLine(x_ligne, marge, x_ligne, marge + hauteurDispo); // Lignes verticales
+                    g2d.drawLine(marge, y_ligne, marge + largeurDispo, y_ligne); // Lignes horizontales
                 }
             }
         }
 
         /**
          * Dessine une représentation 3D avec mise en évidence des conditions aux limites
+         * (Adaptation de l'original, pourrait nécessiter plus de travail pour être parfait)
          */
         private void dessinerSurface3DAvecConditions(Graphics2D g2d) {
             double[][] U = maillage.getU();
-            int N = maillage.getN();
+            int N_total = maillage.getN_total();
+            if (N_total == 0) return;
 
-            // Paramètres de projection isométrique
             double angleX = Math.PI / 6;
             double angleY = Math.PI / 4;
             double facteurZ = 50.0;
 
             int centreX = getWidth() / 2;
-            int centreY = getHeight() / 2;
-            int echelle = Math.min(getWidth(), getHeight()) / (N + 4);
+            int centreY = getHeight() / 2 + 50; // Descendre un peu pour le titre
+            int echelle = Math.min(getWidth(), getHeight()) / (N_total + 2); // Un peu plus petit
 
-            // Calcul des valeurs min/max
             double[] minMax = calculerMinMax(U);
             double minVal = minMax[0];
             double maxVal = minMax[1];
-            double amplitude = maxVal - minVal;
+            double amplitude = (Math.abs(maxVal - minVal) < 1e-9) ? 1.0 : (maxVal - minVal);
 
-            // Dessin de la surface avec distinction des bords
-            for (int i = 0; i <= N + 1; i++) {
-                for (int j = 0; j <= N + 1; j++) {
-                    // Coordonnées 3D
-                    double x1 = (j - (N+1)/2.0) * echelle / 2;
-                    double y1 = (i - (N+1)/2.0) * echelle / 2;
-                    double z1 = (U[i][j] - minVal) / amplitude * facteurZ;
 
-                    // Projection isométrique
-                    int screenX = (int) (centreX + x1 * Math.cos(angleY) + z1 * Math.sin(angleY));
-                    int screenY = (int) (centreY - y1 * Math.cos(angleX) - z1 * Math.sin(angleX));
+            Point[][] pointsProjetes = new Point[N_total][N_total];
 
-                    // Couleur et taille selon le type de point
-                    if (maillage.isBoundary(i, j)) {
-                        // Points des conditions aux limites
+            // Projeter tous les points
+            for (int i = 0; i < N_total; i++) {
+                for (int j = 0; j < N_total; j++) {
+                    double x_norm = (j - (N_total - 1) / 2.0) * echelle; // Coordonnées centrées
+                    double y_norm = (i - (N_total - 1) / 2.0) * echelle;
+                    double z_norm = (U[i][j] - minVal) / amplitude * facteurZ;
+
+                    int screenX = (int) (centreX + x_norm * Math.cos(angleY) - y_norm * Math.sin(angleY));
+                    int screenY = (int) (centreY - x_norm * Math.sin(angleY) * Math.sin(angleX)
+                        - y_norm * Math.cos(angleY) * Math.sin(angleX)
+                        + z_norm * Math.cos(angleX));
+                    pointsProjetes[i][j] = new Point(screenX, screenY);
+                }
+            }
+
+            // Dessiner les polygones (de l'arrière vers l'avant pour un effet de masquage simple)
+            for (int i = N_total - 2; i >= 0; i--) {
+                for (int j = N_total - 2; j >= 0; j--) {
+                    Path2D path = new Path2D.Double();
+                    path.moveTo(pointsProjetes[i][j].x, pointsProjetes[i][j].y);
+                    path.lineTo(pointsProjetes[i][j+1].x, pointsProjetes[i][j+1].y);
+                    path.lineTo(pointsProjetes[i+1][j+1].x, pointsProjetes[i+1][j+1].y);
+                    path.lineTo(pointsProjetes[i+1][j].x, pointsProjetes[i+1][j].y);
+                    path.closePath();
+
+                    // Couleur basée sur la valeur moyenne de la cellule
+                    double valMoyenneCellule = (U[i][j] + U[i+1][j] + U[i][j+1] + U[i+1][j+1]) / 4.0;
+                    double valNorm = normaliser(valMoyenneCellule, minVal, maxVal);
+                    g2d.setColor(getCouleurHeatmap(valNorm));
+                    g2d.fill(path);
+                    g2d.setColor(Color.DARK_GRAY);
+                    g2d.draw(path);
+                }
+            }
+
+            // Dessiner les points des conditions aux limites en évidence
+            for (int i = 0; i < N_total; i++) {
+                for (int j = 0; j < N_total; j++) {
+                    if (maillage.isBoundary(i,j) && mettreEnEvidenceBords) {
                         g2d.setColor(Color.RED);
-                        g2d.fillOval(screenX - 3, screenY - 3, 6, 6);
-                        g2d.setColor(Color.BLACK);
-                        g2d.drawOval(screenX - 3, screenY - 3, 6, 6);
-                    } else {
-                        // Points intérieurs
-                        double valeurNormalisee = (U[i][j] - minVal) / amplitude;
-                        Color couleur = getCouleurHeatmap(valeurNormalisee);
-                        g2d.setColor(couleur);
-                        g2d.fillOval(screenX - 2, screenY - 2, 4, 4);
-                    }
-
-                    // Connexions pour former la surface
-                    g2d.setColor(new Color(100, 100, 100, 150));
-                    g2d.setStroke(new BasicStroke(1));
-
-                    if (j < N + 1) {
-                        double x2 = ((j+1) - (N+1)/2.0) * echelle / 2;
-                        double z2 = (U[i][j+1] - minVal) / amplitude * facteurZ;
-                        int screenX2 = (int) (centreX + x2 * Math.cos(angleY) + z2 * Math.sin(angleY));
-                        int screenY2 = (int) (centreY - y1 * Math.cos(angleX) - z2 * Math.sin(angleX));
-                        g2d.drawLine(screenX, screenY, screenX2, screenY2);
-                    }
-
-                    if (i < N + 1) {
-                        double y2 = ((i+1) - (N+1)/2.0) * echelle / 2;
-                        double z2 = (U[i+1][j] - minVal) / amplitude * facteurZ;
-                        int screenX2 = (int) (centreX + x1 * Math.cos(angleY) + z2 * Math.sin(angleY));
-                        int screenY2 = (int) (centreY - y2 * Math.cos(angleX) - z2 * Math.sin(angleX));
-                        g2d.drawLine(screenX, screenY, screenX2, screenY2);
+                        g2d.fillOval(pointsProjetes[i][j].x - 3, pointsProjetes[i][j].y - 3, 6, 6);
                     }
                 }
             }
         }
+
 
         /**
          * Dessine une visualisation spécifique des conditions aux limites
          */
         private void dessinerVisualisationConditions(Graphics2D g2d) {
-            if (maillage == null || maillage.getConditionsLimites() == null) {
+            if (maillage == null || maillage.getConditionsLimites() == null || maillage.getN_total() < 2) {
                 dessinerMessageAttente(g2d);
                 return;
             }
 
-            int N = maillage.getN();
+            int N_total = maillage.getN_total();
             double h = maillage.getH();
             ConditionsLimites conditions = maillage.getConditionsLimites();
 
             int marge = 60;
-            int largeur = getWidth() - 2 * marge;
-            int hauteur = getHeight() - 2 * marge - 100;
+            int largeurPlot = getWidth() - 2 * marge;
+            int hauteurPlot = getHeight() - 2 * marge - 100; // Espace pour légende en bas
 
-            // Fond
             g2d.setColor(new Color(250, 250, 250));
-            g2d.fillRect(marge, marge, largeur, hauteur);
-
-            // Contour du domaine
+            g2d.fillRect(marge, marge, largeurPlot, hauteurPlot);
             g2d.setColor(Color.BLACK);
-            g2d.setStroke(new BasicStroke(3));
-            g2d.drawRect(marge, marge, largeur, hauteur);
+            g2d.setStroke(new BasicStroke(2));
+            g2d.drawRect(marge, marge, largeurPlot, hauteurPlot);
 
-            // Échantillonnage des conditions aux limites
-            int nbEchantillons = 50;
-
-            // Bord inférieur (y = 0)
-            g2d.setColor(Color.BLUE);
-            g2d.setStroke(new BasicStroke(4));
-            for (int k = 0; k < nbEchantillons - 1; k++) {
-                double t1 = (double) k / (nbEchantillons - 1);
-                double t2 = (double) (k + 1) / (nbEchantillons - 1);
-
-                double val1 = conditions.getValeurBord(0, (int)(t1 * (N + 1)), N, h);
-                double val2 = conditions.getValeurBord(0, (int)(t2 * (N + 1)), N, h);
-
-                int x1 = marge + (int) (t1 * largeur);
-                int x2 = marge + (int) (t2 * largeur);
-                int y1 = marge + hauteur - (int) (Math.abs(val1) * 20);
-                int y2 = marge + hauteur - (int) (Math.abs(val2) * 20);
-
-                g2d.drawLine(x1, y1, x2, y2);
+            // Trouver min/max des valeurs de CL pour normaliser l'affichage graphique
+            double minCL = Double.MAX_VALUE;
+            double maxCL = Double.MIN_VALUE;
+            for(int k=0; k < N_total; k++){
+                minCL = Math.min(minCL, conditions.getValeurBord(0, k, N_total, h));
+                maxCL = Math.max(maxCL, conditions.getValeurBord(0, k, N_total, h));
+                minCL = Math.min(minCL, conditions.getValeurBord(N_total-1, k, N_total, h));
+                maxCL = Math.max(maxCL, conditions.getValeurBord(N_total-1, k, N_total, h));
+                minCL = Math.min(minCL, conditions.getValeurBord(k, 0, N_total, h));
+                maxCL = Math.max(maxCL, conditions.getValeurBord(k, 0, N_total, h));
+                minCL = Math.min(minCL, conditions.getValeurBord(k, N_total-1, N_total, h));
+                maxCL = Math.max(maxCL, conditions.getValeurBord(k, N_total-1, N_total, h));
+            }
+            if (Math.abs(maxCL - minCL) < 1e-9) { // Éviter division par zéro si CL constantes
+                maxCL = minCL + 1.0;
             }
 
-            // Bord supérieur (y = 1)
+            double plotHeightRange = hauteurPlot / 4.0; // Hauteur pour la variation des CL
+
+            // Bord inférieur (y=0), dessiné en bas du rectangle de visualisation
+            g2d.setColor(Color.BLUE); g2d.setStroke(new BasicStroke(2));
+            Path2D pathInf = new Path2D.Double();
+            pathInf.moveTo(marge, marge + hauteurPlot);
+            for (int j_idx = 0; j_idx < N_total; j_idx++) {
+                double x_coord = j_idx * h; // de 0 à 1
+                double val = conditions.getValeurBord(0, j_idx, N_total, h);
+                double y_plot = marge + hauteurPlot - normaliser(val, minCL, maxCL) * plotHeightRange;
+                if (j_idx == 0) pathInf.moveTo(marge + x_coord * largeurPlot, y_plot);
+                else pathInf.lineTo(marge + x_coord * largeurPlot, y_plot);
+            }
+            g2d.draw(pathInf);
+
+            // Bord supérieur (y=1), dessiné en haut
             g2d.setColor(Color.RED);
-            for (int k = 0; k < nbEchantillons - 1; k++) {
-                double t1 = (double) k / (nbEchantillons - 1);
-                double t2 = (double) (k + 1) / (nbEchantillons - 1);
-
-                double val1 = conditions.getValeurBord(N + 1, (int)(t1 * (N + 1)), N, h);
-                double val2 = conditions.getValeurBord(N + 1, (int)(t2 * (N + 1)), N, h);
-
-                int x1 = marge + (int) (t1 * largeur);
-                int x2 = marge + (int) (t2 * largeur);
-                int y1 = marge + (int) (Math.abs(val1) * 20);
-                int y2 = marge + (int) (Math.abs(val2) * 20);
-
-                g2d.drawLine(x1, y1, x2, y2);
+            Path2D pathSup = new Path2D.Double();
+            pathSup.moveTo(marge, marge);
+            for (int j_idx = 0; j_idx < N_total; j_idx++) {
+                double x_coord = j_idx * h;
+                double val = conditions.getValeurBord(N_total - 1, j_idx, N_total, h);
+                double y_plot = marge + normaliser(val, minCL, maxCL) * plotHeightRange;
+                if (j_idx == 0) pathSup.moveTo(marge + x_coord * largeurPlot, y_plot);
+                else pathSup.lineTo(marge + x_coord * largeurPlot, y_plot);
             }
+            g2d.draw(pathSup);
 
-            // Bord gauche (x = 0)
-            g2d.setColor(Color.GREEN);
-            for (int k = 0; k < nbEchantillons - 1; k++) {
-                double t1 = (double) k / (nbEchantillons - 1);
-                double t2 = (double) (k + 1) / (nbEchantillons - 1);
-
-                double val1 = conditions.getValeurBord((int)(t1 * (N + 1)), 0, N, h);
-                double val2 = conditions.getValeurBord((int)(t2 * (N + 1)), 0, N, h);
-
-                int y1 = marge + hauteur - (int) (t1 * hauteur);
-                int y2 = marge + hauteur - (int) (t2 * hauteur);
-                int x1 = marge + (int) (Math.abs(val1) * 20);
-                int x2 = marge + (int) (Math.abs(val2) * 20);
-
-                g2d.drawLine(x1, y1, x2, y2);
+            // Bord gauche (x=0), dessiné à gauche
+            g2d.setColor(Color.GREEN.darker());
+            Path2D pathGauche = new Path2D.Double();
+            pathGauche.moveTo(marge, marge + hauteurPlot);
+            for (int i_idx = 0; i_idx < N_total; i_idx++) {
+                double y_coord = i_idx * h; // de 0 à 1
+                double val = conditions.getValeurBord(i_idx, 0, N_total, h);
+                double x_plot = marge + normaliser(val, minCL, maxCL) * (largeurPlot / 4.0) ; // Variation horizontale
+                if (i_idx == 0) pathGauche.moveTo(x_plot, marge + hauteurPlot - y_coord * hauteurPlot);
+                else pathGauche.lineTo(x_plot, marge + hauteurPlot - y_coord * hauteurPlot);
             }
+            g2d.draw(pathGauche);
 
-            // Bord droit (x = 1)
-            g2d.setColor(Color.ORANGE);
-            for (int k = 0; k < nbEchantillons - 1; k++) {
-                double t1 = (double) k / (nbEchantillons - 1);
-                double t2 = (double) (k + 1) / (nbEchantillons - 1);
-
-                double val1 = conditions.getValeurBord((int)(t1 * (N + 1)), N + 1, N, h);
-                double val2 = conditions.getValeurBord((int)(t2 * (N + 1)), N + 1, N, h);
-
-                int y1 = marge + hauteur - (int) (t1 * hauteur);
-                int y2 = marge + hauteur - (int) (t2 * hauteur);
-                int x1 = marge + largeur - (int) (Math.abs(val1) * 20);
-                int x2 = marge + largeur - (int) (Math.abs(val2) * 20);
-
-                g2d.drawLine(x1, y1, x2, y2);
+            // Bord droit (x=1), dessiné à droite
+            g2d.setColor(Color.ORANGE.darker());
+            Path2D pathDroit = new Path2D.Double();
+            pathDroit.moveTo(marge + largeurPlot, marge + hauteurPlot);
+            for (int i_idx = 0; i_idx < N_total; i_idx++) {
+                double y_coord = i_idx * h;
+                double val = conditions.getValeurBord(i_idx, N_total - 1, N_total, h);
+                double x_plot = marge + largeurPlot - normaliser(val, minCL, maxCL) * (largeurPlot/4.0);
+                if (i_idx == 0) pathDroit.moveTo(x_plot, marge + hauteurPlot - y_coord * hauteurPlot);
+                else pathDroit.lineTo(x_plot, marge + hauteurPlot - y_coord * hauteurPlot);
             }
+            g2d.draw(pathDroit);
 
-            // Légende des bords
+
             g2d.setColor(Color.BLACK);
             g2d.setFont(new Font("Arial", Font.BOLD, 12));
             g2d.drawString("Visualisation des Conditions aux Limites", marge, marge - 20);
-
             g2d.setFont(new Font("Arial", Font.PLAIN, 10));
-            g2d.setColor(Color.BLUE);
-            g2d.drawString("Bord inférieur (y=0)", marge, getHeight() - 60);
-            g2d.setColor(Color.RED);
-            g2d.drawString("Bord supérieur (y=1)", marge, getHeight() - 45);
-            g2d.setColor(Color.GREEN);
-            g2d.drawString("Bord gauche (x=0)", marge, getHeight() - 30);
-            g2d.setColor(Color.ORANGE);
-            g2d.drawString("Bord droit (x=1)", marge, getHeight() - 15);
+            int legendeY = getHeight() - 75;
+            g2d.setColor(Color.BLUE); g2d.drawString("Bord inférieur (y=0)", marge, legendeY);
+            g2d.setColor(Color.RED); g2d.drawString("Bord supérieur (y=1)", marge, legendeY + 15);
+            g2d.setColor(Color.GREEN.darker()); g2d.drawString("Bord gauche (x=0)", marge, legendeY + 30);
+            g2d.setColor(Color.ORANGE.darker()); g2d.drawString("Bord droit (x=1)", marge, legendeY + 45);
+            g2d.setColor(Color.BLACK);
+            g2d.drawString(String.format("Plage CL: [%.2f, %.2f]", minCL, maxCL), marge + 150, legendeY);
         }
+
 
         /**
          * Dessine les conditions aux limites sur les courbes de niveau
          */
         private void dessinerConditionsAuxLimitesSurContours(Graphics2D g2d, int marge,
-                                                             double echelleX, double echelleY, int N) {
-            double[][] U = maillage.getU();
+                                                             double echelleX, double echelleY, int N_total) {
+            if (N_total < 2) return;
+            // Met en évidence les segments du bord du domaine
+            g2d.setStroke(new BasicStroke(3f));
 
-            // Mise en évidence des valeurs aux bords
-            g2d.setStroke(new BasicStroke(3));
-
-            // Bord inférieur
-            g2d.setColor(new Color(0, 0, 255, 150));
-            for (int j = 0; j < N + 1; j++) {
-                int x1 = (int) (marge + j * echelleX);
-                int x2 = (int) (marge + (j + 1) * echelleX);
-                int y = marge + (int) ((N + 1) * echelleY);
-                g2d.drawLine(x1, y, x2, y);
+            // Bord inférieur (i=0)
+            g2d.setColor(new Color(0, 0, 255, 150)); // Bleu semi-transparent
+            for (int j_seg = 0; j_seg < N_total - 1; j_seg++) { // N_total-1 segments
+                int x1 = (int) (marge + j_seg * echelleX);
+                int x2 = (int) (marge + (j_seg + 1) * echelleX);
+                int y_plot = marge + (int) ((N_total - 1) * echelleY); // Bord du bas en coords d'affichage
+                g2d.drawLine(x1, y_plot, x2, y_plot);
             }
 
-            // Bord supérieur
-            g2d.setColor(new Color(255, 0, 0, 150));
-            for (int j = 0; j < N + 1; j++) {
-                int x1 = (int) (marge + j * echelleX);
-                int x2 = (int) (marge + (j + 1) * echelleX);
-                int y = marge;
-                g2d.drawLine(x1, y, x2, y);
+            // Bord supérieur (i=N_total-1)
+            g2d.setColor(new Color(255, 0, 0, 150)); // Rouge semi-transparent
+            for (int j_seg = 0; j_seg < N_total - 1; j_seg++) {
+                int x1 = (int) (marge + j_seg * echelleX);
+                int x2 = (int) (marge + (j_seg + 1) * echelleX);
+                int y_plot = marge; // Bord du haut en coords d'affichage
+                g2d.drawLine(x1, y_plot, x2, y_plot);
             }
 
-            // Bords gauche et droit
-            g2d.setColor(new Color(0, 255, 0, 150));
-            for (int i = 0; i < N + 1; i++) {
-                int y1 = (int) (marge + i * echelleY);
-                int y2 = (int) (marge + (i + 1) * echelleY);
-                g2d.drawLine(marge, y1, marge, y2);
-                g2d.drawLine((int) (marge + (N + 1) * echelleX), y1,
-                    (int) (marge + (N + 1) * echelleX), y2);
+            // Bord gauche (j=0)
+            g2d.setColor(new Color(0, 255, 0, 150)); // Vert semi-transparent
+            for (int i_seg = 0; i_seg < N_total - 1; i_seg++) {
+                int y1_plot = (int) (marge + i_seg * echelleY); // Inversion Y gérée par dessinContourCellule
+                int y2_plot = (int) (marge + (i_seg + 1) * echelleY);
+                int x_plot = marge;
+                g2d.drawLine(x_plot, y1_plot, x_plot, y2_plot);
+            }
+
+            // Bord droit (j=N_total-1)
+            // g2d.setColor(new Color(255,165,0,150)); // Orange semi-transparent (ou garder vert)
+            for (int i_seg = 0; i_seg < N_total - 1; i_seg++) {
+                int y1_plot = (int) (marge + i_seg * echelleY);
+                int y2_plot = (int) (marge + (i_seg + 1) * echelleY);
+                int x_plot = (int) (marge + (N_total - 1) * echelleX);
+                g2d.drawLine(x_plot, y1_plot, x_plot, y2_plot);
             }
         }
+
 
         /**
          * Calcule les niveaux pour les courbes de niveau
          */
         private void calculerNiveauxContours() {
-            if (maillage == null) return;
-
+            if (maillage == null || maillage.getU() == null) return;
             double[] minMax = calculerMinMax(maillage.getU());
             double minVal = minMax[0];
             double maxVal = minMax[1];
 
-            int nbNiveaux = 12;
-            niveauxContours = new double[nbNiveaux];
+            if (Math.abs(maxVal - minVal) < 1e-9) { // Si la solution est constante
+                niveauxContours = new double[]{minVal};
+                return;
+            }
 
+            int nbNiveaux = 12; // Nombre de courbes de niveau
+            niveauxContours = new double[nbNiveaux];
             for (int i = 0; i < nbNiveaux; i++) {
-                niveauxContours[i] = minVal + (maxVal - minVal) * i / (nbNiveaux - 1);
+                // Évite les niveaux exacts min/max pour une meilleure visibilité
+                niveauxContours[i] = minVal + (maxVal - minVal) * (i + 0.5) / nbNiveaux;
             }
         }
 
-        /**
-         * Dessine un contour dans une cellule
-         */
-        private void dessinerContourCellule(Graphics2D g2d, double[][] U, int i, int j, double niveau,
-                                            int marge, double echelleX, double echelleY, int N) {
 
-            // Valeurs aux quatre coins
-            double v00 = U[i][j];
-            double v10 = U[i][j+1];
-            double v01 = U[i+1][j];
-            double v11 = U[i+1][j+1];
+        /**
+         * Dessine un contour dans une cellule (algorithme Marching Squares simplifié)
+         * @param U matrice des valeurs
+         * @param i_bl, j_bl indices globaux du coin inférieur gauche (bottom-left) de la cellule
+         * @param niveau valeur de l'isocourbe
+         * @param N_total taille totale du maillage
+         */
+        private void dessinerContourCellule(Graphics2D g2d, double[][] U, int i_bl, int j_bl, double niveau,
+                                            int marge, double echelleX, double echelleY, int N_total) {
+            // Coins de la cellule (bottom-left, bottom-right, top-left, top-right)
+            // Indices globaux :
+            // (i_bl, j_bl) (i_bl, j_bl+1)
+            // (i_bl+1, j_bl) (i_bl+1, j_bl+1)
+            double v_bl = U[i_bl][j_bl];         // Valeur au coin inférieur gauche
+            double v_br = U[i_bl][j_bl+1];       // Valeur au coin inférieur droit
+            double v_tl = U[i_bl+1][j_bl];       // Valeur au coin supérieur gauche
+            double v_tr = U[i_bl+1][j_bl+1];     // Valeur au coin supérieur droit
+
+            // Coordonnées d'affichage des coins de la cellule (y est inversé)
+            // Coin inférieur gauche de la cellule (i_bl, j_bl)
+            double x_base = marge + j_bl * echelleX;
+            double y_base_math = i_bl * echelleY; // y mathématique (0 en bas)
+            double y_base_display = marge + (N_total - 1 - i_bl) * echelleY; // y affichage (0 en haut) pour le coin BAS de la cellule
 
             List<Point2D.Double> intersections = new ArrayList<>();
 
-            // Calcul des intersections (algorithme marching squares simplifié)
-            // Bord gauche
-            if ((v00 <= niveau && niveau <= v01) || (v01 <= niveau && niveau <= v00)) {
-                if (Math.abs(v01 - v00) > 1e-10) {
-                    double t = (niveau - v00) / (v01 - v00);
-                    double x = marge + j * echelleX;
-                    double y = marge + (N + 1 - i - t) * echelleY;
-                    intersections.add(new Point2D.Double(x, y));
+            // Segment gauche : entre (i_bl, j_bl) et (i_bl+1, j_bl)
+            if ((v_bl <= niveau && niveau < v_tl) || (v_tl <= niveau && niveau < v_bl)) {
+                if (Math.abs(v_tl - v_bl) > 1e-10) {
+                    double t = (niveau - v_bl) / (v_tl - v_bl); // t va de 0 (v_bl) à 1 (v_tl)
+                    intersections.add(new Point2D.Double(x_base, y_base_display - t * echelleY));
+                }
+            }
+            // Segment droit : entre (i_bl, j_bl+1) et (i_bl+1, j_bl+1)
+            if ((v_br <= niveau && niveau < v_tr) || (v_tr <= niveau && niveau < v_br)) {
+                if (Math.abs(v_tr - v_br) > 1e-10) {
+                    double t = (niveau - v_br) / (v_tr - v_br);
+                    intersections.add(new Point2D.Double(x_base + echelleX, y_base_display - t * echelleY));
+                }
+            }
+            // Segment bas : entre (i_bl, j_bl) et (i_bl, j_bl+1)
+            if ((v_bl <= niveau && niveau < v_br) || (v_br <= niveau && niveau < v_bl)) {
+                if (Math.abs(v_br - v_bl) > 1e-10) {
+                    double t = (niveau - v_bl) / (v_br - v_bl);
+                    intersections.add(new Point2D.Double(x_base + t * echelleX, y_base_display));
+                }
+            }
+            // Segment haut : entre (i_bl+1, j_bl) et (i_bl+1, j_bl+1)
+            if ((v_tl <= niveau && niveau < v_tr) || (v_tr <= niveau && niveau < v_tl)) {
+                if (Math.abs(v_tr - v_tl) > 1e-10) {
+                    double t = (niveau - v_tl) / (v_tr - v_tl);
+                    intersections.add(new Point2D.Double(x_base + t * echelleX, y_base_display - echelleY));
                 }
             }
 
-            // Bord droit
-            if ((v10 <= niveau && niveau <= v11) || (v11 <= niveau && niveau <= v10)) {
-                if (Math.abs(v11 - v10) > 1e-10) {
-                    double t = (niveau - v10) / (v11 - v10);
-                    double x = marge + (j + 1) * echelleX;
-                    double y = marge + (N + 1 - i - t) * echelleY;
-                    intersections.add(new Point2D.Double(x, y));
-                }
-            }
-
-            // Bord bas
-            if ((v00 <= niveau && niveau <= v10) || (v10 <= niveau && niveau <= v00)) {
-                if (Math.abs(v10 - v00) > 1e-10) {
-                    double t = (niveau - v00) / (v10 - v00);
-                    double x = marge + (j + t) * echelleX;
-                    double y = marge + (N + 1 - i) * echelleY;
-                    intersections.add(new Point2D.Double(x, y));
-                }
-            }
-
-            // Bord haut
-            if ((v01 <= niveau && niveau <= v11) || (v11 <= niveau && niveau <= v01)) {
-                if (Math.abs(v11 - v01) > 1e-10) {
-                    double t = (niveau - v01) / (v11 - v01);
-                    double x = marge + (j + t) * echelleX;
-                    double y = marge + (N + 1 - i - 1) * echelleY;
-                    intersections.add(new Point2D.Double(x, y));
-                }
-            }
-
-            // Dessin des segments
-            if (intersections.size() >= 2) {
-                Point2D.Double p1 = intersections.get(0);
-                Point2D.Double p2 = intersections.get(1);
-                g2d.drawLine((int) p1.x, (int) p1.y, (int) p2.x, (int) p2.y);
+            if (intersections.size() == 2) {
+                g2d.draw(new Line2D.Double(intersections.get(0), intersections.get(1)));
+            } else if (intersections.size() == 4) { // Cas ambigus, on joint arbitrairement par paires
+                g2d.draw(new Line2D.Double(intersections.get(0), intersections.get(1)));
+                g2d.draw(new Line2D.Double(intersections.get(2), intersections.get(3)));
             }
         }
+
 
         /**
          * Dessine la barre de couleur avec informations sur les conditions aux limites
@@ -562,129 +626,137 @@ public class VisualiseurGraphique {
             int largeur = 25;
             int hauteur = 200;
 
-            // Gradient principal
             for (int i = 0; i < hauteur; i++) {
-                double valeurNormalisee = (double) i / hauteur;
+                double valeurNormalisee = (double) i / hauteur; // 0 en bas, 1 en haut
                 Color couleur = getCouleurHeatmap(valeurNormalisee);
                 g2d.setColor(couleur);
-                g2d.fillRect(x, y + hauteur - i, largeur, 1);
+                g2d.fillRect(x, y + hauteur - 1 - i, largeur, 1); // y + hauteur -1 - i pour dessiner de bas en haut
             }
 
-            // Contour
             g2d.setColor(Color.BLACK);
-            g2d.setStroke(new BasicStroke(2));
+            g2d.setStroke(new BasicStroke(1)); // Moins épais
             g2d.drawRect(x, y, largeur, hauteur);
 
-            // Étiquettes des valeurs
             g2d.setFont(new Font("Arial", Font.PLAIN, 10));
             g2d.drawString(String.format("%.3f", maxVal), x + largeur + 5, y + 10);
-            g2d.drawString(String.format("%.3f", (maxVal + minVal) / 2), x + largeur + 5, y + hauteur / 2);
-            g2d.drawString(String.format("%.3f", minVal), x + largeur + 5, y + hauteur + 5);
+            g2d.drawString(String.format("%.3f", (maxVal + minVal) / 2), x + largeur + 5, y + hauteur / 2 + 5);
+            g2d.drawString(String.format("%.3f", minVal), x + largeur + 5, y + hauteur);
 
-            // Indication spéciale pour les conditions aux limites
-            if (mettreEnEvidenceBords) {
-                g2d.setColor(Color.RED);
-                g2d.fillRect(x + largeur + 2, y + hauteur + 20, 10, 10);
+            if (mettreEnEvidenceBords && typeVisu == TypeVisualisation.COLORATION) { // Uniquement pour coloration
+                Color clExampleColor = getCouleurConditionLimite(minVal + (maxVal-minVal)*0.75, minVal, maxVal); // Exemple
+                g2d.setColor(clExampleColor);
+                g2d.fillRect(x, y + hauteur + 10, largeur, 10);
                 g2d.setColor(Color.BLACK);
-                g2d.drawRect(x + largeur + 2, y + hauteur + 20, 10, 10);
-                g2d.setFont(new Font("Arial", Font.PLAIN, 9));
-                g2d.drawString("Conditions aux limites", x + largeur + 15, y + hauteur + 29);
+                g2d.drawRect(x, y + hauteur + 10, largeur, 10);
+                g2d.drawString("Bords", x + largeur + 5, y + hauteur + 19);
             }
         }
+
 
         /**
          * Dessine les informations sur les conditions aux limites
          */
         private void dessinerInformationsConditions(Graphics2D g2d) {
             if (maillage == null) return;
-
             g2d.setColor(Color.BLACK);
             g2d.setFont(new Font("Arial", Font.BOLD, 12));
-
-            String info = String.format("Maillage: %dx%d, h=%.4f",
-                maillage.getN() + 2, maillage.getN() + 2, maillage.getH());
+            String info = String.format("Maillage: %dx%d (N_total), h=%.4f",
+                maillage.getN_total(), maillage.getN_total(), maillage.getH());
             g2d.drawString(info, 10, getHeight() - 45);
 
             g2d.setFont(new Font("Arial", Font.PLAIN, 10));
             String conditions = "CL: " + maillage.getConditionsLimites().getDescription();
-            if (conditions.length() > 60) {
-                conditions = conditions.substring(0, 57) + "...";
+            if (conditions.length() > 70) { // Adapter si besoin
+                conditions = conditions.substring(0, 67) + "...";
             }
             g2d.drawString(conditions, 10, getHeight() - 30);
-
-            g2d.drawString("Type: " + typeVisu.getNom(), 10, getHeight() - 15);
+            g2d.drawString("Type Visu: " + typeVisu.getNom(), 10, getHeight() - 15);
         }
 
         /**
          * Dessine la carte des erreurs
          */
         private void dessinerCarteErreurs(Graphics2D g2d) {
-            if (analyseErreurs == null || analyseErreurs.carteErreurs == null) {
+            if (analyseErreurs == null || analyseErreurs.carteErreurs == null || !analyseErreurs.solutionExacteDisponible) {
                 g2d.setColor(Color.RED);
                 g2d.setFont(new Font("Arial", Font.BOLD, 14));
-                g2d.drawString("Aucune analyse d'erreur disponible", 50, 50);
+                g2d.drawString("Carte des erreurs non disponible.", 50, 50);
                 g2d.setFont(new Font("Arial", Font.PLAIN, 12));
-                g2d.drawString("Résolvez d'abord un problème avec solution exacte", 50, 75);
+                g2d.drawString("Vérifiez que la solution exacte est calculée et que l'analyse a été faite.", 50, 75);
                 return;
             }
 
-            double[][] erreurs = analyseErreurs.carteErreurs;
-            int N = maillage.getN();
+            double[][] erreurs = analyseErreurs.carteErreurs; // Taille N_total x N_total
+            int N_total = maillage.getN_total();
 
             int marge = 50;
-            int tailleCellule = Math.min((getWidth() - 2 * marge - 150) / (N + 2),
-                (getHeight() - 2 * marge - 50) / (N + 2));
+            int largeurDispo = getWidth() - 2 * marge - 150; // Espace pour barre de couleur
+            int hauteurDispo = getHeight() - 2 * marge - 50;
 
-            double[] minMax = calculerMinMax(erreurs);
-            double maxErreur = minMax[1];
+            int tailleCellule = (N_total > 0) ? Math.min(largeurDispo / N_total, hauteurDispo / N_total) : 10;
+            tailleCellule = Math.max(1, tailleCellule);
 
-            for (int i = 0; i <= N + 1; i++) {
-                for (int j = 0; j <= N + 1; j++) {
-                    int x = marge + j * tailleCellule;
-                    int y = marge + (N + 1 - i) * tailleCellule;
+            int offsetX = marge;
+            int offsetY = marge;
+
+            // Mettre à jour pour le tooltip (montrera les erreurs ici)
+            this.lastOffsetX = offsetX;
+            this.lastOffsetY = offsetY;
+            this.lastTailleCellule = tailleCellule;
+            // this.lastNtotal est déjà à jour
+
+
+            double[] minMaxErreur = calculerMinMax(erreurs); // 0 à maxErreur
+            double maxErreur = minMaxErreur[1];
+            if (maxErreur < 1e-12) maxErreur = 1e-12; // Pour éviter division par zéro si erreur nulle
+
+            for (int i = 0; i < N_total; i++) { // Indice global i
+                for (int j = 0; j < N_total; j++) { // Indice global j
+                    int x_rect = offsetX + j * tailleCellule;
+                    int y_rect = offsetY + (N_total - 1 - i) * tailleCellule; // Inversion axe i
 
                     Color couleur;
                     if (maillage.isBoundary(i, j)) {
-                        couleur = Color.DARK_GRAY; // CL en gris foncé
+                        couleur = Color.DARK_GRAY; // Erreur sur CL généralement nulle ou non pertinente
                     } else {
                         double erreurNormalisee = erreurs[i][j] / maxErreur;
                         couleur = getCouleurErreur(erreurNormalisee);
                     }
-
                     g2d.setColor(couleur);
-                    g2d.fillRect(x, y, tailleCellule, tailleCellule);
+                    g2d.fillRect(x_rect, y_rect, tailleCellule, tailleCellule);
 
-                    g2d.setColor(Color.LIGHT_GRAY);
-                    g2d.drawRect(x, y, tailleCellule, tailleCellule);
+                    if (afficherGrille) {
+                        g2d.setColor(Color.LIGHT_GRAY);
+                        g2d.drawRect(x_rect, y_rect, tailleCellule, tailleCellule);
+                    }
                 }
             }
-
-            // Légende pour les erreurs
-            dessinerLegendErreurs(g2d, marge + (N + 2) * tailleCellule + 20, marge, maxErreur);
+            dessinerLegendeErreurs(g2d, offsetX + N_total * tailleCellule + 20, offsetY, maxErreur);
         }
+
 
         /**
          * Dessine la légende pour les erreurs
          */
-        private void dessinerLegendErreurs(Graphics2D g2d, int x, int y, double maxErreur) {
+        private void dessinerLegendeErreurs(Graphics2D g2d, int x, int y, double maxErreur) {
             int largeur = 20;
             int hauteur = 200;
 
             for (int i = 0; i < hauteur; i++) {
-                double valeurNormalisee = (double) i / hauteur;
+                double valeurNormalisee = (double) i / hauteur; // 0 en bas, 1 en haut
                 Color couleur = getCouleurErreur(valeurNormalisee);
                 g2d.setColor(couleur);
-                g2d.fillRect(x, y + hauteur - i, largeur, 1);
+                g2d.fillRect(x, y + hauteur - 1 - i, largeur, 1);
             }
-
             g2d.setColor(Color.BLACK);
             g2d.drawRect(x, y, largeur, hauteur);
 
             g2d.setFont(new Font("Arial", Font.PLAIN, 10));
-            g2d.drawString(String.format("%.2e", maxErreur), x + largeur + 5, y + 5);
-            g2d.drawString(String.format("%.2e", maxErreur / 2), x + largeur + 5, y + hauteur / 2);
-            g2d.drawString("0.0", x + largeur + 5, y + hauteur + 5);
+            g2d.drawString(String.format("%.2e", maxErreur), x + largeur + 5, y + 10);
+            g2d.drawString(String.format("%.2e", maxErreur / 2), x + largeur + 5, y + hauteur / 2 + 5);
+            g2d.drawString("0.0", x + largeur + 5, y + hauteur);
         }
+
 
         /**
          * Dessine un message d'attente
@@ -692,23 +764,20 @@ public class VisualiseurGraphique {
         private void dessinerMessageAttente(Graphics g) {
             g.setColor(Color.GRAY);
             g.setFont(new Font("Arial", Font.ITALIC, 16));
-            String message = "En attente de données...";
+            String message = "En attente de données (Maillage non initialisé ou N_total=0)...";
             FontMetrics fm = g.getFontMetrics();
-            int x = (getWidth() - fm.stringWidth(message)) / 2;
-            int y = getHeight() / 2;
-            g.drawString(message, x, y);
+            int x_msg = (getWidth() - fm.stringWidth(message)) / 2;
+            int y_msg = getHeight() / 2;
+            g.drawString(message, x_msg, y_msg);
         }
 
         /**
-         * Dessine une légende générale
+         * Dessine une légende générale (peut être vide si non nécessaire)
          */
         private void dessinerLegende(Graphics2D g2d) {
-            // Légende spécifique selon le type de visualisation
-            if (typeVisu == TypeVisualisation.CONDITIONS_LIMITES) {
-                // Légende déjà incluse dans la visualisation
-                return;
-            }
+            // Pas de légende générale pour l'instant, les barres de couleurs suffisent.
         }
+
 
         // Méthodes utilitaires
 
@@ -716,16 +785,20 @@ public class VisualiseurGraphique {
          * Calcule les valeurs min et max d'une matrice
          */
         private double[] calculerMinMax(double[][] matrice) {
+            if (matrice == null || matrice.length == 0 || matrice[0].length == 0) {
+                return new double[]{0,0};
+            }
             double min = Double.MAX_VALUE;
             double max = Double.MIN_VALUE;
-
             for (int i = 0; i < matrice.length; i++) {
                 for (int j = 0; j < matrice[i].length; j++) {
-                    min = Math.min(min, matrice[i][j]);
-                    max = Math.max(max, matrice[i][j]);
+                    if (!Double.isNaN(matrice[i][j]) && !Double.isInfinite(matrice[i][j])) {
+                        min = Math.min(min, matrice[i][j]);
+                        max = Math.max(max, matrice[i][j]);
+                    }
                 }
             }
-
+            if (min == Double.MAX_VALUE) return new double[]{0,0}; // Si toutes les valeurs sont NaN/Inf
             return new double[]{min, max};
         }
 
@@ -733,57 +806,53 @@ public class VisualiseurGraphique {
          * Normalise une valeur entre 0 et 1
          */
         private double normaliser(double valeur, double min, double max) {
-            if (Math.abs(max - min) < 1e-12) return 0.5;
-            return (valeur - min) / (max - min);
+            if (Double.isNaN(valeur)) return 0.5; // Valeur neutre pour NaN
+            if (Math.abs(max - min) < 1e-12) return (valeur > min) ? 1.0 : ( (valeur < min) ? 0.0 : 0.5); // Évite division par zéro
+            double norm = (valeur - min) / (max - min);
+            return Math.max(0.0, Math.min(1.0, norm)); // Clamp entre 0 et 1
         }
 
         /**
-         * Génère une couleur pour la heatmap
+         * Génère une couleur pour la heatmap (bleu -> cyan -> vert -> jaune -> rouge)
          */
         private Color getCouleurHeatmap(double valeurNormalisee) {
-            if (valeurNormalisee < 0.25) {
-                float ratio = (float) (valeurNormalisee / 0.25);
-                return new Color(0, (int) (ratio * 255), 255);
-            } else if (valeurNormalisee < 0.5) {
-                float ratio = (float) ((valeurNormalisee - 0.25) / 0.25);
-                return new Color(0, 255, (int) (255 * (1 - ratio)));
-            } else if (valeurNormalisee < 0.75) {
-                float ratio = (float) ((valeurNormalisee - 0.5) / 0.25);
-                return new Color((int) (ratio * 255), 255, 0);
-            } else {
-                float ratio = (float) ((valeurNormalisee - 0.75) / 0.25);
-                return new Color(255, (int) (255 * (1 - ratio)), 0);
+            // Assurer que valeurNormalisee est dans [0, 1]
+            float v = (float) Math.max(0.0, Math.min(1.0, valeurNormalisee));
+
+            if (v < 0.25f) { // Bleu à Cyan
+                return new Color(0, (int)(255 * (v / 0.25f)), 255);
+            } else if (v < 0.5f) { // Cyan à Vert
+                return new Color(0, 255, (int)(255 * (1 - (v - 0.25f) / 0.25f)));
+            } else if (v < 0.75f) { // Vert à Jaune
+                return new Color((int)(255 * ((v - 0.5f) / 0.25f)), 255, 0);
+            } else { // Jaune à Rouge
+                return new Color(255, (int)(255 * (1 - (v - 0.75f) / 0.25f)), 0);
             }
         }
 
+
         /**
-         * Génère une couleur spéciale pour les conditions aux limites
+         * Génère une couleur spéciale pour les conditions aux limites (plus sombre)
          */
         private Color getCouleurConditionLimite(double valeur, double minVal, double maxVal) {
             double valeurNormalisee = normaliser(valeur, minVal, maxVal);
             Color couleurBase = getCouleurHeatmap(valeurNormalisee);
-
-            // Assombrir légèrement pour distinguer des points intérieurs
-            int r = Math.max(0, couleurBase.getRed() - 30);
-            int g = Math.max(0, couleurBase.getGreen() - 30);
-            int b = Math.max(0, couleurBase.getBlue() - 30);
-
-            return new Color(r, g, b);
+            return couleurBase.darker(); // Simplement assombrir
         }
 
         /**
-         * Génère une couleur pour la visualisation des erreurs
+         * Génère une couleur pour la visualisation des erreurs (blanc -> jaune -> orange -> rouge)
          */
         private Color getCouleurErreur(double valeurNormalisee) {
-            if (valeurNormalisee < 0.33) {
-                float ratio = (float) (valeurNormalisee / 0.33);
-                return new Color(255, 255, (int) (255 * (1 - ratio)));
-            } else if (valeurNormalisee < 0.66) {
-                float ratio = (float) ((valeurNormalisee - 0.33) / 0.33);
-                return new Color(255, (int) (255 * (1 - ratio * 0.5)), 0);
-            } else {
-                float ratio = (float) ((valeurNormalisee - 0.66) / 0.34);
-                return new Color(255, (int) (128 * (1 - ratio)), 0);
+            float v = (float) Math.max(0.0, Math.min(1.0, valeurNormalisee)); // Clamp
+            if (v < 0.33f) { // Blanc (255,255,255) à Jaune (255,255,0)
+                return new Color(255, 255, (int)(255 * (1 - v/0.33f)));
+            } else if (v < 0.66f) { // Jaune (255,255,0) à Orange (255,128,0)
+                float t = (v - 0.33f) / 0.33f;
+                return new Color(255, (int)(255 * (1-t) + 128 * t), 0);
+            } else { // Orange (255,128,0) à Rouge (255,0,0)
+                float t = (v - 0.66f) / 0.34f;
+                return new Color(255, (int)(128 * (1-t)), 0);
             }
         }
 
@@ -791,41 +860,26 @@ public class VisualiseurGraphique {
          * Génère des couleurs distinctes pour les contours
          */
         private Color[] genererCouleursContours(int nbCouleurs) {
+            if (nbCouleurs <=0) return new Color[0];
             Color[] couleurs = new Color[nbCouleurs];
             for (int i = 0; i < nbCouleurs; i++) {
                 float hue = (float) i / nbCouleurs;
-                couleurs[i] = Color.getHSBColor(hue, 0.8f, 0.8f);
+                couleurs[i] = Color.getHSBColor(hue, 0.9f, 0.7f); // Saturation et Brillance ajustées
             }
             return couleurs;
         }
 
         // Getters et setters
-
-        public void setAfficherGrille(boolean afficher) {
-            this.afficherGrille = afficher;
-            repaint();
-        }
-
-        public void setAfficherValeurs(boolean afficher) {
-            this.afficherValeurs = afficher;
-            repaint();
-        }
-
-        public void setAfficherConditionsLimites(boolean afficher) {
-            this.afficherConditionsLimites = afficher;
-            repaint();
-        }
-
-        public void setMettreEnEvidenceBords(boolean evidencer) {
-            this.mettreEnEvidenceBords = evidencer;
-            repaint();
-        }
-
+        public void setAfficherGrille(boolean afficher) { this.afficherGrille = afficher; repaint(); }
+        public void setAfficherValeurs(boolean afficher) { this.afficherValeurs = afficher; repaint(); }
+        public void setAfficherConditionsLimitesTexte(boolean afficher) { this.afficherConditionsLimitesTexte = afficher; repaint(); }
+        public void setMettreEnEvidenceBords(boolean evidencer) { this.mettreEnEvidenceBords = evidencer; repaint(); }
         public boolean isAfficherGrille() { return afficherGrille; }
         public boolean isAfficherValeurs() { return afficherValeurs; }
-        public boolean isAfficherConditionsLimites() { return afficherConditionsLimites; }
+        public boolean isAfficherConditionsLimitesTexte() { return afficherConditionsLimitesTexte; }
         public boolean isMettreEnEvidenceBords() { return mettreEnEvidenceBords; }
     }
+
 
     /**
      * Crée une fenêtre de visualisation avec contrôles adaptés aux conditions générales
@@ -840,81 +894,72 @@ public class VisualiseurGraphique {
         panel.setTypeVisualisation(typeInitial);
         panel.mettreAJour(maillage, analyse);
 
-        // Panel de contrôles étendus
         JPanel controles = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.anchor = GridBagConstraints.WEST;
+        gbc.insets = new Insets(5, 5, 5, 5); gbc.anchor = GridBagConstraints.WEST;
 
-        // Type de visualisation
-        gbc.gridx = 0; gbc.gridy = 0;
-        controles.add(new JLabel("Type:"), gbc);
+        gbc.gridx = 0; gbc.gridy = 0; controles.add(new JLabel("Type Visu:"), gbc);
         gbc.gridx = 1;
         JComboBox<TypeVisualisation> comboType = new JComboBox<>(TypeVisualisation.values());
         comboType.setSelectedItem(typeInitial);
-        comboType.addActionListener(e -> {
-            TypeVisualisation type = (TypeVisualisation) comboType.getSelectedItem();
-            panel.setTypeVisualisation(type);
-        });
+        comboType.addActionListener(e -> panel.setTypeVisualisation((TypeVisualisation) comboType.getSelectedItem()));
         controles.add(comboType, gbc);
 
-        // Options d'affichage
         gbc.gridx = 0; gbc.gridy = 1;
         JCheckBox checkGrille = new JCheckBox("Grille", panel.isAfficherGrille());
         checkGrille.addActionListener(e -> panel.setAfficherGrille(checkGrille.isSelected()));
         controles.add(checkGrille, gbc);
 
         gbc.gridx = 1;
-        JCheckBox checkValeurs = new JCheckBox("Valeurs", panel.isAfficherValeurs());
+        JCheckBox checkValeurs = new JCheckBox("Valeurs (si zoom)", panel.isAfficherValeurs());
         checkValeurs.addActionListener(e -> panel.setAfficherValeurs(checkValeurs.isSelected()));
         controles.add(checkValeurs, gbc);
 
         gbc.gridx = 0; gbc.gridy = 2;
-        JCheckBox checkConditions = new JCheckBox("Conditions aux limites", panel.isAfficherConditionsLimites());
-        checkConditions.addActionListener(e -> panel.setAfficherConditionsLimites(checkConditions.isSelected()));
-        controles.add(checkConditions, gbc);
+        JCheckBox checkInfoCL = new JCheckBox("Infos CL (texte)", panel.isAfficherConditionsLimitesTexte());
+        checkInfoCL.addActionListener(e -> panel.setAfficherConditionsLimitesTexte(checkInfoCL.isSelected()));
+        controles.add(checkInfoCL, gbc);
 
         gbc.gridx = 1;
         JCheckBox checkEvidenceBords = new JCheckBox("Évidence bords", panel.isMettreEnEvidenceBords());
         checkEvidenceBords.addActionListener(e -> panel.setMettreEnEvidenceBords(checkEvidenceBords.isSelected()));
         controles.add(checkEvidenceBords, gbc);
 
-        // Informations sur les conditions
         gbc.gridx = 0; gbc.gridy = 3; gbc.gridwidth = 2;
-        JTextArea infoConditions = new JTextArea(3, 40);
-        infoConditions.setEditable(false);
-        infoConditions.setBackground(new Color(240, 240, 240));
-        infoConditions.setBorder(BorderFactory.createTitledBorder("Conditions aux Limites"));
+        JTextArea infoConditionsArea = new JTextArea(3, 30); // Plus petit
+        infoConditionsArea.setEditable(false);
+        infoConditionsArea.setFont(new Font("Arial", Font.PLAIN, 10));
+        infoConditionsArea.setBackground(fenetre.getBackground()); // Couleur du fond de la fenêtre
+        infoConditionsArea.setBorder(BorderFactory.createTitledBorder("Infos Conditions Limites"));
         if (maillage != null && maillage.getConditionsLimites() != null) {
-            infoConditions.setText(maillage.getConditionsLimites().getDescription());
-            infoConditions.append("\nCompatibilité: " +
+            infoConditionsArea.setText(maillage.getConditionsLimites().getDescription());
+            infoConditionsArea.append("\nCompatibilité: " +
                 (maillage.getConditionsLimites().verifierCompatibilite() ? "OK" : "Problème"));
         }
-        controles.add(new JScrollPane(infoConditions), gbc);
+        controles.add(new JScrollPane(infoConditionsArea), gbc);
 
-        // Boutons d'action
+
         gbc.gridy = 4; gbc.gridwidth = 1;
         JButton boutonExporter = new JButton("Exporter Image");
         boutonExporter.addActionListener(e -> exporterImage(panel));
         controles.add(boutonExporter, gbc);
 
         gbc.gridx = 1;
-        JButton boutonConditionsSeules = new JButton("Voir Conditions");
-        boutonConditionsSeules.addActionListener(e -> {
+        JButton boutonVisuCL = new JButton("Voir CL seules");
+        boutonVisuCL.addActionListener(e -> {
             panel.setTypeVisualisation(TypeVisualisation.CONDITIONS_LIMITES);
             comboType.setSelectedItem(TypeVisualisation.CONDITIONS_LIMITES);
         });
-        controles.add(boutonConditionsSeules, gbc);
+        controles.add(boutonVisuCL, gbc);
 
         fenetre.setLayout(new BorderLayout());
         fenetre.add(controles, BorderLayout.NORTH);
         fenetre.add(panel, BorderLayout.CENTER);
-
         fenetre.pack();
         fenetre.setLocationRelativeTo(null);
-
         return fenetre;
     }
+
 
     /**
      * Exporte l'image de visualisation
@@ -922,25 +967,25 @@ public class VisualiseurGraphique {
     private static void exporterImage(PanelVisualisation panel) {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Images PNG", "png"));
-
         if (chooser.showSaveDialog(panel) == JFileChooser.APPROVE_OPTION) {
             try {
                 java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(
                     panel.getWidth(), panel.getHeight(), java.awt.image.BufferedImage.TYPE_INT_RGB);
-                Graphics2D g2d = image.createGraphics();
-                panel.paint(g2d);
-                g2d.dispose();
+                Graphics2D g2dImg = image.createGraphics();
+                panel.paint(g2dImg); // Important: utiliser paint et non paintComponent directement
+                g2dImg.dispose();
 
                 java.io.File file = chooser.getSelectedFile();
                 if (!file.getName().toLowerCase().endsWith(".png")) {
                     file = new java.io.File(file.getAbsolutePath() + ".png");
                 }
-
                 javax.imageio.ImageIO.write(image, "PNG", file);
-                JOptionPane.showMessageDialog(panel, "Image exportée: " + file.getAbsolutePath());
-
+                JOptionPane.showMessageDialog(panel, "Image exportée: " + file.getAbsolutePath(),
+                    "Exportation Réussie", JOptionPane.INFORMATION_MESSAGE);
             } catch (java.io.IOException e) {
-                JOptionPane.showMessageDialog(panel, "Erreur lors de l'export: " + e.getMessage());
+                JOptionPane.showMessageDialog(panel, "Erreur lors de l'export: " + e.getMessage(),
+                    "Erreur Exportation", JOptionPane.ERROR_MESSAGE);
+                e.printStackTrace();
             }
         }
     }
@@ -955,159 +1000,8 @@ public class VisualiseurGraphique {
         });
     }
 
-    /**
-     * Crée un panel de comparaison pour différentes conditions aux limites
-     */
-    public static JPanel creerPanelComparaisonConditions(Maillage[] maillages, String[] titres,
-                                                         AnalyseurErreurs.ResultatAnalyse[] analyses) {
-        JPanel panelPrincipal = new JPanel(new GridLayout(2, 2, 10, 10));
-
-        for (int i = 0; i < Math.min(4, maillages.length); i++) {
-            JPanel panelIndividuel = new JPanel(new BorderLayout());
-
-            PanelVisualisation panel = new PanelVisualisation(350, 350);
-            panel.setMettreEnEvidenceBords(true); // Mettre en évidence les conditions
-            panel.mettreAJour(maillages[i], analyses != null ? analyses[i] : null);
-
-            // Titre avec informations sur les conditions
-            JPanel panelTitre = new JPanel(new BorderLayout());
-            JLabel titre = new JLabel(titres[i], JLabel.CENTER);
-            titre.setFont(new Font("Arial", Font.BOLD, 12));
-
-            JLabel conditions = new JLabel("CL: " + maillages[i].getConditionsLimites().getType().name(), JLabel.CENTER);
-            conditions.setFont(new Font("Arial", Font.PLAIN, 10));
-            conditions.setForeground(Color.BLUE);
-
-            panelTitre.add(titre, BorderLayout.NORTH);
-            panelTitre.add(conditions, BorderLayout.SOUTH);
-
-            panelIndividuel.add(panelTitre, BorderLayout.NORTH);
-            panelIndividuel.add(panel, BorderLayout.CENTER);
-            panelIndividuel.setBorder(BorderFactory.createEtchedBorder());
-
-            panelPrincipal.add(panelIndividuel);
-        }
-
-        return panelPrincipal;
-    }
-
-    /**
-     * Crée une animation montrant l'évolution de la solution avec différentes conditions
-     */
-    public static JFrame creerAnimationConditions(Maillage[] maillagesSequence, String[] descriptions) {
-        JFrame fenetre = new JFrame("Animation - Évolution avec Conditions aux Limites");
-        fenetre.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        fenetre.setSize(800, 700);
-
-        PanelVisualisation panel = new PanelVisualisation(700, 600);
-        panel.setMettreEnEvidenceBords(true);
-
-        JPanel controles = new JPanel(new FlowLayout());
-
-        JSlider slider = new JSlider(0, maillagesSequence.length - 1, 0);
-        slider.addChangeListener(e -> {
-            int index = slider.getValue();
-            panel.mettreAJour(maillagesSequence[index], null);
-        });
-
-        JLabel labelDesc = new JLabel(descriptions[0]);
-        labelDesc.setFont(new Font("Arial", Font.BOLD, 12));
-
-        slider.addChangeListener(e -> {
-            int index = slider.getValue();
-            labelDesc.setText(descriptions[index]);
-        });
-
-        JButton boutonAuto = new JButton("Animation Auto");
-        Timer timer = new Timer(1000, e -> {
-            int val = slider.getValue();
-            slider.setValue((val + 1) % maillagesSequence.length);
-        });
-
-        boutonAuto.addActionListener(e -> {
-            if (timer.isRunning()) {
-                timer.stop();
-                boutonAuto.setText("Animation Auto");
-            } else {
-                timer.start();
-                boutonAuto.setText("Arrêter");
-            }
-        });
-
-        controles.add(new JLabel("Étape:"));
-        controles.add(slider);
-        controles.add(boutonAuto);
-
-        JPanel panelInfo = new JPanel(new BorderLayout());
-        panelInfo.add(labelDesc, BorderLayout.CENTER);
-        panelInfo.setBorder(BorderFactory.createTitledBorder("Description"));
-
-        fenetre.setLayout(new BorderLayout());
-        fenetre.add(controles, BorderLayout.NORTH);
-        fenetre.add(panel, BorderLayout.CENTER);
-        fenetre.add(panelInfo, BorderLayout.SOUTH);
-
-        // Initialiser avec le premier maillage
-        panel.mettreAJour(maillagesSequence[0], null);
-
-        fenetre.setLocationRelativeTo(null);
-        return fenetre;
-    }
-
-    /**
-     * Analyse comparative visuelle des conditions aux limites
-     */
-    public static void analyseVisuelleConditions(Maillage maillage) {
-        // Créer différentes visualisations de la même solution
-        String[] types = {"Coloration", "Contours", "3D", "Conditions"};
-        TypeVisualisation[] typesVisu = {
-            TypeVisualisation.COLORATION,
-            TypeVisualisation.COURBES_NIVEAU,
-            TypeVisualisation.CONDITIONS_LIMITES
-        };
-
-        JFrame fenetre = new JFrame("Analyse Visuelle - " + maillage.getConditionsLimites().getDescription());
-        fenetre.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        fenetre.setSize(1200, 800);
-
-        JPanel panelPrincipal = new JPanel(new GridLayout(2, 2, 10, 10));
-
-        for (int i = 0; i < 4; i++) {
-            JPanel panelIndividuel = new JPanel(new BorderLayout());
-
-            PanelVisualisation panel = new PanelVisualisation(400, 350);
-            panel.setTypeVisualisation(typesVisu[i]);
-            panel.setMettreEnEvidenceBords(true);
-            panel.mettreAJour(maillage, null);
-
-            JLabel titre = new JLabel(types[i], JLabel.CENTER);
-            titre.setFont(new Font("Arial", Font.BOLD, 14));
-            titre.setBorder(BorderFactory.createEmptyBorder(5, 0, 5, 0));
-
-            panelIndividuel.add(titre, BorderLayout.NORTH);
-            panelIndividuel.add(panel, BorderLayout.CENTER);
-            panelIndividuel.setBorder(BorderFactory.createEtchedBorder());
-
-            panelPrincipal.add(panelIndividuel);
-        }
-
-        // Informations globales
-        JPanel panelInfo = new JPanel(new BorderLayout());
-        JTextArea infoArea = new JTextArea(4, 0);
-        infoArea.setEditable(false);
-        infoArea.setText("Maillage: " + (maillage.getN() + 2) + "×" + (maillage.getN() + 2) + "\n" +
-            "Conditions aux limites: " + maillage.getConditionsLimites().getDescription() + "\n" +
-            "Compatibilité: " + (maillage.getConditionsLimites().verifierCompatibilite() ? "OK" : "Problème") + "\n" +
-            "Cohérence du maillage: " + (maillage.verifierCoherence() ? "OK" : "Problème"));
-        infoArea.setBackground(new Color(240, 240, 240));
-        panelInfo.add(new JScrollPane(infoArea), BorderLayout.CENTER);
-        panelInfo.setBorder(BorderFactory.createTitledBorder("Informations"));
-
-        fenetre.setLayout(new BorderLayout());
-        fenetre.add(panelPrincipal, BorderLayout.CENTER);
-        fenetre.add(panelInfo, BorderLayout.SOUTH);
-
-        fenetre.setLocationRelativeTo(null);
-        fenetre.setVisible(true);
-    }
+    // Les méthodes creerPanelComparaisonConditions, creerAnimationConditions, analyseVisuelleConditions
+    // nécessiteraient des ajustements similaires pour N_total si elles sont utilisées.
+    // Par exemple, dans analyseVisuelleConditions :
+    // infoArea.setText("Maillage: " + maillage.getN_total() + "×" + maillage.getN_total() + "\n" + ...);
 }
