@@ -247,8 +247,10 @@ public class Maillage {
     private void configurerCas6() {
         for (int i = 0; i < N_total; i++) {
             for (int j = 0; j < N_total; j++) {
+                double x = j * h;
+                double y = i * h;
                 F[i][j] = 0.0;
-                exactSol[i][j] = 0.0; // Solution dépend des CL
+                exactSol[i][j] = 2 * x + y; // Solution dépend des CL
             }
         }
     }
@@ -259,7 +261,7 @@ public class Maillage {
                 double x = j * h;
                 double y = i * h;
                 F[i][j] = 4 * Math.PI * Math.PI * Math.sin(Math.PI * x) * Math.cos(Math.PI * y);
-                exactSol[i][j] = 0.0; // Solution dépend des CL
+                exactSol[i][j] = 0.0;
             }
         }
     }

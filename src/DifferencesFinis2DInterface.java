@@ -98,7 +98,7 @@ public class DifferencesFinis2DInterface extends JFrame {
         comboCasTest.setToolTipText("Sélectionnez le cas de test à résoudre");
 
         // N_total doit être au moins 3 pour avoir N_interieur >= 1
-        spinnerTailleMaillage = new JSpinner(new SpinnerNumberModel(20, 3, 200, 1));
+        spinnerTailleMaillage = new JSpinner(new SpinnerNumberModel(20, 3, 1000, 1));
         spinnerTailleMaillage.setToolTipText("Nombre total de points par direction (N_total, bords inclus)");
 
         comboMethode = new JComboBox<>(SolveurGaussSeidel.MethodeResolution.values());
@@ -638,7 +638,7 @@ public class DifferencesFinis2DInterface extends JFrame {
                 @Override
                 protected AnalyseurErreurs.EtudeConvergence doInBackground() throws Exception {
                     publish("Début analyse de convergence...");
-                    int[] taillesN_total = {10, 20, 30, 40, 50}; // N_total (bords inclus)
+                    int[] taillesN_total = {3}; // N_total (bords inclus)
                     // Passer une copie des conditions actuelles pour éviter modifs concurrentes
                     return AnalyseurErreurs.etudierConvergence(casTest, taillesN_total, methode, conditionsActuelles);
                 }

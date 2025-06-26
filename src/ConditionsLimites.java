@@ -164,15 +164,13 @@ public class ConditionsLimites {
      * Configure des conditions aux limites polynomiales
      */
     public void configurerConditionsPolynomiales() {
-        bordInferieur = t -> t * (1 - t);          // Parabole s'annulant aux coins
-        bordSuperieur = t -> 0.5 * t * (1 - t);    // Parabole plus faible
-        bordGauche = t -> t * t;                   // Croissance quadratique
-        bordDroit = t -> (1 - t) * (1 - t);       // Décroissance quadratique
+        bordInferieur = (t_x) -> 2 * t_x;
+        bordSuperieur = (t_x) -> 2 * t_x + 1;
+        bordGauche = (t_y) -> t_y;                 // Croissance quadratique
+        bordDroit = (t_y) -> 2 + t_y;       // Décroissance quadratique
 
         type = TypeCondition.POLYNOMIALES;
-        description = "Conditions polynomiales (exemples quadratiques)";
-
-        // System.out.println("Conditions aux limites configurées: " + description); // Commenté
+        description = "CL Polynomiales: U(bord) = 2x+y";
     }
 
     /**

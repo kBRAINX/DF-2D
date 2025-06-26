@@ -31,8 +31,8 @@ public class SolveurGaussSeidel {
      */
     public enum MethodeResolution {
         GAUSS_SEIDEL_CLASSIQUE("Gauss-Seidel Classique"),
-        GAUSS_SEIDEL_RELAXATION("Gauss-Seidel (SOR)"),
-        GAUSS_SEIDEL_PARALLELE("Gauss-Seidel Par");
+        GAUSS_SEIDEL_RELAXATION("Gauss (SOR)"),
+        GAUSS_SEIDEL_PARALLELE("Gauss Par");
 
         private final String nom;
         MethodeResolution(String nom) { this.nom = nom; }
